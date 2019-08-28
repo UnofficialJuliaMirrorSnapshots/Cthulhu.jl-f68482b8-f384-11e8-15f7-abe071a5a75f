@@ -1,28 +1,9 @@
-Base.@kwdef mutable struct CthulhuConfig
-    enable_highlighter::Bool = false
-    highlighter::Cmd = `pygmentize -l`
-end
-
 highlighter_exists(config::CthulhuConfig) =
     Sys.which(config.highlighter.exec[1]) !== nothing
 
 @init begin
     CONFIG.enable_highlighter = highlighter_exists(CONFIG)
 end
-
-"""
-    Cthulhu.CONFIG
-
-# Options
-- `enable_highlighter::Bool`: Use command line `highlighter` to syntax highlight
-  LLVM and native code.  Set to `true` if `highlighter` exists at the import
-  time.
-- `highlighter::Cmd`: A command line program that receives "llvm" or "asm" as
-  an argument and the code as stdin.  Defaults to `$(CthulhuConfig().highlighter)`.
-"""
-const CONFIG = CthulhuConfig()
-
-const asm_syntax = Ref(:att)
 
 function highlight(io, x, lexer, config::CthulhuConfig)
     config.enable_highlighter || return print(io, x)
@@ -40,7 +21,7 @@ function cthulhu_llvm(io::IO, mi, optimize, debuginfo, params, config::CthulhuCo
     dump = InteractiveUtils._dump_function_linfo(
         mi, params.world, #=native=# false,
         #=wrapper=# false, #=strip_ir_metadata=# true,
-        #=dump_module=# false, #=syntax=# asm_syntax[],
+        #=dump_module=# false, #=syntax=# config.asm_syntax,
         optimize, debuginfo ? :source : :none)
     highlight(io, dump, "llvm", config)
 end
@@ -49,9 +30,28 @@ function cthulhu_native(io::IO, mi, optimize, debuginfo, params, config::Cthulhu
     dump = InteractiveUtils._dump_function_linfo(
         mi, params.world, #=native=# true,
         #=wrapper=# false, #=strip_ir_metadata=# true,
-        #=dump_module=# false, #=syntax=# asm_syntax[],
+        #=dump_module=# false, #=syntax=# config.asm_syntax,
         optimize, debuginfo ? :source : :none)
     highlight(io, dump, "asm", config)
+end
+
+function cthulhu_ast(io::IO, mi, optimize, debuginfo, params, config::CthulhuConfig)
+    meth = mi.def
+    ast = definition(Expr, meth)
+    if ast!==nothing
+        dump(io, ast; maxdepth=typemax(Int))
+        # Or should use: ?
+        #Meta.show_expr(io, ast)
+        # Could even highlight the above as some kind-of LISP
+    else
+        @info "Could not retrieve AST. AST display requires Revise.jl to be loaded." meth
+    end
+end
+
+function cthulhu_source(io::IO, mi, optimize, debuginfo, params, config::CthulhuConfig)
+    meth = mi.def
+    src, line = definition(String, meth)
+    highlight(io, src, "julia", config)
 end
 
 cthulhu_warntype(args...) = cthulhu_warntype(stdout, args...)
@@ -78,3 +78,27 @@ function cthulhu_warntype(io::IO, src, rettype, debuginfo)
     end
     return nothing
 end
+
+
+function cthulu_typed(io::IO, debuginfo_key, CI, rettype, mi, iswarn)
+    println()
+    println("│ ─ $(string(Callsite(-1, MICallInfo(mi, rettype))))")
+
+    if iswarn
+        cthulhu_warntype(stdout, CI, rettype, debuginfo_key)
+    elseif VERSION >= v"1.1.0-DEV.762"
+        show(stdout, CI, debuginfo = debuginfo_key)
+    else
+        display(CI=>rt)
+    end
+    println()
+end
+
+# These are standard code views that don't need any special handling,
+# This namedtuple maps toggle::Symbol to function
+const codeviews = (;
+    llvm=cthulhu_llvm,
+    native=cthulhu_native,
+    ast=cthulhu_ast,
+    source=cthulhu_source,
+)

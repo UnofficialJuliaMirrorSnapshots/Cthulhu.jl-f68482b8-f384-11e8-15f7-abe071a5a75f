@@ -1,9 +1,34 @@
 module Cthulhu
 
+using CodeTracking: definition
 using InteractiveUtils
 
 using Core: MethodInstance
 const Compiler = Core.Compiler
+
+Base.@kwdef mutable struct CthulhuConfig
+    enable_highlighter::Bool = false
+    highlighter::Cmd = `pygmentize -l`
+    asm_syntax::Symbol = :att
+    dead_code_elimination::Bool = true
+end
+
+"""
+    Cthulhu.CONFIG
+
+# Options
+- `enable_highlighter::Bool`: Use command line `highlighter` to syntax highlight
+  LLVM and native code.  Set to `true` if `highlighter` exists at the import
+  time.
+- `highlighter::Cmd`: A command line program that receives "llvm" or "asm" as
+  an argument and the code as stdin.  Defaults to `$(CthulhuConfig().highlighter)`.
+- `asm_syntax::Symbol`: Set the syntax of assembly code being used.
+  Defaults to `$(CthulhuConfig().asm_syntax)`.
+- `dead_code_elimination::Bool`: Enable dead-code elimination for high-level Julia IR.
+  Defaults to `true`. DCE is known to be buggy and you may want to disable it if you
+  encounter errors. Please report such bugs with a MWE to Julia or Cthulhu. 
+"""
+const CONFIG = CthulhuConfig()
 
 include("callsite.jl")
 include("reflection.jl")
@@ -109,33 +134,21 @@ const descend = descend_code_typed
 # src/ui.jl provides the user facing interface to which _descend responds
 ##
 function _descend(mi::MethodInstance; iswarn::Bool, params=current_params(), optimize::Bool=true, kwargs...)
-    display_CI = true
     debuginfo = true
     if :debuginfo in keys(kwargs)
         selected = kwargs[:debuginfo]
         # TODO: respect default
         debuginfo = selected == :source
     end
+    debuginfo_key = debuginfo ? :source : :none
 
+    display_CI = true
     while true
         (CI, rt, slottypes) = do_typeinf_slottypes(mi, optimize, params)
-        preprocess_ci!(CI, mi, optimize)
+        preprocess_ci!(CI, mi, optimize, CONFIG)
         callsites = find_callsites(CI, mi, slottypes; params=params, kwargs...)
 
-        debuginfo_key = debuginfo ? :source : :none
-        if display_CI
-            println()
-            println("│ ─ $(string(Callsite(-1, MICallInfo(mi, rt))))")
-
-            if iswarn
-                cthulhu_warntype(stdout, CI, rt, debuginfo_key)
-            elseif VERSION >= v"1.1.0-DEV.762"
-                show(stdout, CI, debuginfo = debuginfo_key)
-            else
-                display(CI=>rt)
-            end
-            println()
-        end
+        display_CI && cthulu_typed(stdout, debuginfo_key, CI, rt, mi, iswarn)
         display_CI = true
 
         TerminalMenus.config(cursor = '•', scroll = :wrap)
@@ -174,20 +187,16 @@ function _descend(mi::MethodInstance; iswarn::Bool, params=current_params(), opt
             if next_mi === nothing
                 continue
             end
+
             _descend(next_mi; params=params, optimize=optimize,
                      iswarn=iswarn, debuginfo=debuginfo_key, kwargs...)
+
         elseif toggle === :warn
             iswarn ⊻= true
         elseif toggle === :optimize
             optimize ⊻= true
         elseif toggle === :debuginfo
             debuginfo ⊻= true
-        elseif toggle === :llvm
-            cthulhu_llvm(stdout, mi, optimize, debuginfo, params, CONFIG)
-            display_CI = false
-        elseif toggle === :native
-            cthulhu_native(stdout, mi, optimize, debuginfo, params, CONFIG)
-            display_CI = false
         elseif toggle === :highlighter
             CONFIG.enable_highlighter ⊻= true
             if CONFIG.enable_highlighter
@@ -202,7 +211,14 @@ function _descend(mi::MethodInstance; iswarn::Bool, params=current_params(), opt
             Core.println()
             display_CI = false
         else
-            error("Unknown option $toggle")
+            #Handle Standard alternative view, e.g. :native, :llvm
+            view_cmd = get(codeviews, toggle, nothing)
+            if view_cmd !== nothing
+                view_cmd(stdout, mi, optimize, debuginfo, params, CONFIG)
+                display_CI = false
+            else
+                error("Unknown option $toggle")
+            end
         end
     end
 end
